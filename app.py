@@ -6,7 +6,11 @@ import datetime
 import time
 import math
 import re
+import socket
+import threading
+from http.server import HTTPServer, SimpleHTTPRequestHandler
 import extra_streamlit_components as stx
+from streamlit_scroll_to_top import scroll_to_here
 
 # Importieren der Konfiguration aus config.py
 try:
@@ -196,6 +200,15 @@ st.markdown("""
         padding: 0 !important;
     }
     
+    /* Hide empty form containers that create phantom elements */
+    [data-testid="stForm"]:empty,
+    [data-testid="stForm"] > div:empty {
+        display: none !important;
+        height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    
     /* Buttons */
     div.stButton > button {
         background: rgba(45, 48, 58, 0.8);
@@ -293,6 +306,28 @@ st.markdown("""
     .tag-details[open] summary {
         display: none;
     }
+
+    /* Copy Link Button Styling */
+    .copy-link-btn {
+        background: rgba(45, 48, 58, 0.8) !important;
+        color: #fff !important;
+        border: 1px solid var(--glass-border) !important;
+        border-radius: 8px !important;
+        font-weight: 600 !important;
+        padding: 0.5rem 1rem !important;
+        width: 100% !important;
+        min-height: 35px !important;
+        font-size: 0.8rem !important;
+        cursor: pointer !important;
+        transition: all 0.2s ease !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.05em !important;
+    }
+    .copy-link-btn:hover {
+        background: var(--accent) !important;
+        border-color: var(--accent) !important;
+        box-shadow: 0 0 10px var(--accent-glow) !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -336,6 +371,44 @@ def render_preview_html(content):
             background: #ff4b4b;
         }
     </style>
+    <script>
+        function copyToClipboard(text, btn) {
+            const originalText = btn.innerText;
+            function showSuccess(msg) {
+                btn.innerText = "✅ " + msg;
+                btn.style.borderColor = "#4CAF50";
+                setTimeout(() => {
+                    btn.innerText = originalText;
+                    btn.style.borderColor = "";
+                }, 2000);
+            }
+
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(text).then(() => showSuccess("KOPIERT")).catch(e => fallbackCopy(text));
+            } else {
+                fallbackCopy(text);
+            }
+
+            function fallbackCopy(text) {
+                try {
+                    const textArea = document.createElement("textarea");
+                    textArea.value = text;
+                    textArea.style.position = "fixed";
+                    textArea.style.left = "-9999px";
+                    textArea.style.top = "0";
+                    document.body.appendChild(textArea);
+                    textArea.focus();
+                    textArea.select();
+                    const successful = document.execCommand('copy');
+                    document.body.removeChild(textArea);
+                    if (successful) showSuccess("KOPIERT");
+                    else showSuccess("FEHLER");
+                } catch (err) {
+                    showSuccess("FEHLER");
+                }
+            }
+        }
+    </script>
     """
     
     full_html = f"""
@@ -350,11 +423,59 @@ def render_preview_html(content):
     import streamlit.components.v1 as components
     components.html(full_html, height=300, scrolling=True)
 
+@st.cache_resource
+def start_image_server(root_path, port=8505):
+    """Startet einen minimalen Background-Server für direkten PNG-Zugriff (ST Import)"""
+    
+    # Priority: Environment variable (useful for Docker/Reverse Proxy)
+    # Format expected: "http://192.168.1.10" or "https://my-archive.com"
+    external_url = os.environ.get("EXTERNAL_URL")
+    
+    if external_url:
+        # We assume the user provided the full base URL without trailing slash
+        base_host = external_url.rstrip("/")
+    else:
+        # Auto-detect Local IP
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+        except:
+            local_ip = "localhost"
+        base_host = f"http://{local_ip}:{port}"
+
+    class RootHandler(SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=root_path, **kwargs)
+            
+        def translate_path(self, path):
+            # Standard Path Translation
+            original_path = super().translate_path(path)
+            
+            # If the file doesn't exist AND it ends with .png, try the extension-less version
+            if not os.path.exists(original_path) and original_path.lower().endswith(".png"):
+                no_ext_path = original_path[:-4]
+                if os.path.exists(no_ext_path):
+                    return no_ext_path
+            
+            return original_path
+
+        def log_message(self, format, *args):
+            return # Silent
+            
+    try:
+        server = HTTPServer(('0.0.0.0', port), RootHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        return base_host
+    except Exception as e:
+        return f"Error: {e}"
+
 def change_page(new_page):
     """Callback für Paginierung - Synchronisiert alle States"""
     st.session_state.page = new_page
     st.session_state.p_jump = new_page + 1
-    st.session_state.p_jump_b = new_page + 1
 
 @st.cache_resource
 def get_db_connection():
@@ -450,7 +571,11 @@ def render_badges(tags_list):
 
 # --- HAUPTBEREICH ---
 
-st.title("🗃️ Character Archive: Local Edition")
+# Start Image Server
+img_server_url = start_image_server(IMAGE_ROOT)
+
+# Use markdown instead of st.title to avoid phantom container
+st.markdown("# 🗃️ Character Archive: Local Edition")
 
 # Init Session State for Pagination
 if 'page' not in st.session_state: st.session_state.page = 0
@@ -458,6 +583,19 @@ if 'last_query' not in st.session_state: st.session_state.last_query = ""
 
 # Sidebar
 with st.sidebar:
+    # Search Form at the top
+    st.header("🔍 Suche")
+    with st.form("search_form"):
+        search_query = st.text_input("Suchbegriff", placeholder="Suchbegriff eingeben...", value=st.session_state.get('search_input', ""), label_visibility="collapsed")
+        search_btn = st.form_submit_button("Suche", width="stretch")
+        if search_btn:
+            st.session_state.search_input = search_query
+            st.session_state.page = 0
+            st.session_state.p_jump = 1
+            st.session_state.p_jump_b = 1
+            st.rerun()
+    
+    st.divider()
     st.header("Filter & Einstellungen")
     
     source_map = {
@@ -539,31 +677,12 @@ with st.sidebar:
         st.write("Sync Msg:", st.session_state.get("debug_sync_msg", "None"))
         st.write("Sync Waits:", st.session_state.get("sync_waits"))
         st.write("Current Session State:", {k: st.session_state.get(k) for k in DEFAULT_SETTINGS})
+        st.write("Image Server Status:", img_server_url)
         st.write("Cookies Raw:", cookies)
     explain_mode = False
     if debug_mode:
         st.info(f"Root: `{IMAGE_ROOT}`")
         explain_mode = st.checkbox("Zeige Query Plan (EXPLAIN ANALYZE)", value=False)
-
-# Search Input Form
-with st.form("search_form"):
-    # Using vertical_alignment="bottom" for modern Streamlit, or fallback layout
-    try:
-        col_input, col_submit = st.columns([5, 1], vertical_alignment="bottom")
-    except:
-        col_input, col_submit = st.columns([5, 1])
-    
-    with col_input:
-        search_query = st.text_input("🔍 Suche...", placeholder="Suchbegriff eingeben...", value=st.session_state.get('search_input', ""))
-    with col_submit:
-        search_btn = st.form_submit_button("Suche", width="stretch")
-        if search_btn:
-            st.session_state.search_input = search_query
-            st.session_state.page = 0
-            # Reset jump widgets
-            st.session_state.p_jump = 1
-            st.session_state.p_jump_b = 1
-            st.rerun()
 
 def get_json_field(path_list):
     """Helper für SQL JSON Access"""
@@ -829,168 +948,123 @@ if st.session_state.get('search_input') and st.session_state.selected_sources an
                 rows = run_query_cached(full_sql, tuple(params))
                 end_time = time.time()
                 
-                # Extract total count from window function
+                # Spinner ends
                 total_matches = rows[0][-1] if rows else 0
                 total_pages = math.ceil(total_matches / limit) if total_matches > 0 else 1
-                
-                st.info(f"Suche ausgeführt in {end_time - start_time:.4f} Sekunden. (Insgesamt {total_matches} Treffer)")
             
-            # --- PAGINATION CONTROLS (Top) ---
-            try:
-                col_res, col_prev, col_page, col_next = st.columns([3, 0.6, 1.2, 0.6], vertical_alignment="center")
-            except:
-                col_res, col_prev, col_page, col_next = st.columns([3, 0.6, 1.2, 0.6])
-            
-            with col_res:
-                st.markdown(f'<p class="pag-label">S. {st.session_state.page+1} / {total_pages} ({total_matches} Treffer)</p>', unsafe_allow_html=True)
-            with col_prev:
-                if st.session_state.page > 0:
-                     st.button("⬅️", key="prev_top", on_click=change_page, args=(st.session_state.page - 1,))
-            with col_page:
-                if total_pages > 1:
-                    st.number_input("Seite", 1, total_pages, key="p_jump", label_visibility="collapsed", on_change=lambda: change_page(st.session_state.p_jump - 1))
-            with col_next:
-                 if st.session_state.page < total_pages - 1:
-                     st.button("➡️", key="next_top", on_click=change_page, args=(st.session_state.page + 1,))
+            # Mark this position as scroll target for page changes
+            st.write(f"🔍 DEBUG: Calling scroll_to_here at page {st.session_state.page + 1}")
+            scroll_to_here(key="results_top")
+            st.write("✅ DEBUG: scroll_to_here called")
             
             # --- RENDER RESULTS IN GRID ---
-            # Create a 2-column layout for the cards
-            # Adjust columns to be equal if window is wide
-            cols = st.columns(2)
-            
-            for i, row in enumerate(rows):
-                name, img_hash, src, metadata, added, author, tagline, definition, tokens_count, full_count = row
+            # Use 2-column rows for perfectly aligned starting heights
+            for i in range(0, len(rows), 2):
+                grid_cols = st.columns(2, gap="medium")
                 
-                # --- DATA PREP ---
-                real_path, checked_paths = get_image_path(img_hash, debug=debug_mode)
-                
-                # Extract fields from definition
-                card_data = extract_card_data(definition) if definition else {}
-                
-                # Summary Text (Creator Notes preferred, else Tagline, else Desc Truncated)
-                summary_text = card_data.get('creator_notes') or ""
-                if not summary_text: summary_text = tagline or ""
-                # Fallback to Desc First Sentence
-                if not summary_text and card_data.get('description'):
-                    desc = card_data['description']
-                    first_sentence = desc.split('\n')[0]
-                    if len(first_sentence) < 200:
-                         summary_text = first_sentence
-                    else:
-                        summary_text = first_sentence[:200] + "..."
-                
-                # Render in alternating columns
-                with cols[i % 2]:
-                    # --- UI CARD ---
-                    st.markdown("<div class='char-card'>", unsafe_allow_html=True)
-                    
-                    # Inside the card, we still use columns for Image vs Text
-                    # Use a wider split for image/buttons in grid
-                    c1, c2 = st.columns([1.8, 4])
-                    
-                    with c1:
-                        if real_path:
-                            # st.image width='stretch' resolves the deprecation warning
-                            st.image(real_path, width='stretch')
-                        else:
-                            st.markdown(f"🖼️ *Bild fehlt*\n\n`{img_hash[:6]}`")
-                            
-                        # Sub-columns for buttons side-by-side with small gap
-                        btn_col1, btn_col2 = st.columns(2, gap="small")
+                # Check two indices: i and i+1
+                for j in [0, 1]:
+                    idx = i + j
+                    if idx >= len(rows):
+                        break
                         
-                        if real_path:
-                             with open(real_path, "rb") as f:
-                                with btn_col1:
-                                    st.download_button("💾 PNG", f, file_name=f"{name}.png", key=f"dl_{img_hash}_{i}")
+                    with grid_cols[j]:
+                        row = rows[idx]
+                        name, img_hash, src, metadata, added, author, tagline, definition, tokens_count, full_count = row
                         
-                        # JSON Download Button
-                        if definition:
-                            json_str = json.dumps(definition, indent=2, ensure_ascii=False)
-                            with btn_col2:
-                                st.download_button("💾 JSON", json_str, file_name=f"{name}.json", mime="application/json", key=f"dl_json_{img_hash}_{i}")
+                        # --- DATA PREP ---
+                        real_path, checked_paths = get_image_path(img_hash, debug=debug_mode)
+                        card_data = extract_card_data(definition) if definition else {}
+                        
+                        summary_text = card_data.get('creator_notes') or tagline or ""
+                        if not summary_text and card_data.get('description'):
+                            desc = card_data['description'].split('\n')[0]
+                            summary_text = desc[:200] + "..." if len(desc) > 200 else desc
 
-                    with c2:
-                        # HEADER
-                        # Tokens
-                        tokens_val = tokens_count
-                        tokens_label = f"{tokens_val} T" if tokens_val > 0 else "0 T"
-                        token_html = f"<span class='token-badge'>{tokens_label}</span>"
+                        # CLASSIC SPLIT: Image/Buttons Left (C1), Info/Tags Right (C2)
+                        c1, c2 = st.columns([2, 4.5])
                         
-                        author_html = f"<span class='char-author'>by {author}</span>" if author else ""
-                        
-                        st.markdown(f"<div class='char-title' style='font-size: 1.2rem;'>{name} {token_html}</div>", unsafe_allow_html=True)
-                        if author_html:
-                            st.markdown(author_html, unsafe_allow_html=True)
-                        
-                        # SUMMARY (HTML Preview - smaller in grid)
-                        if summary_text:
-                            safe_summary = clean_html(summary_text)
-                            st.markdown("<div class='char-preview-box' style='max-height: 250px;'>", unsafe_allow_html=True)
-                            render_preview_html(safe_summary)
-                            st.markdown("</div>", unsafe_allow_html=True)
+                        with c1:
+                            if real_path:
+                                st.image(real_path, width='stretch')
+                            else:
+                                st.markdown(f"🖼️ *Bild fehlt*\n\n`{img_hash[:6]}`")
                             
-                        # TAGS (Render even fewer in grid to save space)
-                        tags_raw = metadata.get('tags') if metadata else []
-                        tags_list = format_tags(tags_raw)
-                        if not tags_list and definition:
-                            def_tags = None
-                            if isinstance(definition, dict):
-                                def_tags = definition.get('data', {}).get('tags') or definition.get('tags')
-                            if def_tags:
-                                tags_list = format_tags(def_tags)
+                            # Row 1: Downloads
+                            b1, b2 = st.columns(2, gap="small")
+                            if real_path:
+                                 with open(real_path, "rb") as f:
+                                    with b1: st.download_button("💾 PNG", f, file_name=f"{name}.png", key=f"dl_{img_hash}_{idx}")
+                            if definition:
+                                json_str = json.dumps(definition, indent=2, ensure_ascii=False)
+                                with b2: st.download_button("💾 JSON", json_str, file_name=f"{name}.json", key=f"dl_json_{img_hash}_{idx}")
 
-                        if tags_list:
-                            # Show first 8 tags, prioritizing the search match if it exists
-                            display_limit = 8
-                            main_tags = tags_list[:display_limit]
-                            
-                            if search_query and any(search_query.lower() == t.lower() for t in tags_list):
-                                matching_tag = next(t for t in tags_list if t.lower() == search_query.lower())
-                                if matching_tag not in main_tags:
-                                    main_tags[-1] = matching_tag
-                            
-                            tags_html = f'<div class="tags-container">{render_badges(main_tags)}'
-                            
-                            # If there are more tags, make them expandable INLINE
-                            if len(tags_list) > display_limit:
-                                remaining_tags = [t for t in tags_list if t not in main_tags]
-                                more_html = render_badges(remaining_tags)
-                                tags_html += f"""
-                                <details class="tag-details">
-                                    <summary class="tag-badge">+{len(remaining_tags)} weitere</summary>
-                                    {more_html}
-                                </details>
-                                """
-                            
-                            tags_html += '</div>'
-                            st.markdown(tags_html, unsafe_allow_html=True)
-                        
-                        # EXPANDER
-                        with st.expander("📝 Details"):
-                            content_map = {}
-                            if card_data.get('description'): 
-                                content_map["Desc"] = card_data['description']
-                            if card_data.get('first_mes'): 
-                                content_map["First"] = card_data['first_mes']
+                            # Row 2: SillyTavern Link (using st.code for reliable copy)
+                            if real_path:
+                                srv_url = img_server_url if (img_server_url and not img_server_url.startswith("Error")) else f"http://{socket.gethostname()}:{8505}"
+                                rel_path = os.path.relpath(real_path, IMAGE_ROOT).replace("\\", "/")
+                                direct_url = f"{srv_url}/{rel_path}"
+                                if not direct_url.lower().endswith((".png", ".webp", ".jpg", ".jpeg")):
+                                    direct_url += ".png"
                                 
-                            tab_names = list(content_map.keys()) + ["Info", "Raw"]
-                            current_tabs = st.tabs(tab_names)
-                            
-                            idx = 0
-                            for key in content_map:
-                                with current_tabs[idx]:
-                                    st.markdown(content_map[key])
-                                idx += 1
-                                
-                            with current_tabs[idx]:
-                                info_data = {"Added": added.strftime("%y-%m-%d") if added else "?", "Src": src}
-                                st.table(info_data)
-                                idx += 1
-                                
-                            with current_tabs[idx]:
-                                st.json(metadata)
+                                # Use st.expander + st.code for built-in copy functionality
+                                with st.expander("🔗 SillyTavern Import Link"):
+                                    st.code(direct_url, language="text")
 
-                    st.markdown("</div>", unsafe_allow_html=True)
+                        with c2:
+                            # HEADER: Title & Tokens
+                            tokens_label = f"{tokens_count} T" if tokens_count > 0 else "0 T"
+                            token_badge = f"<span class='token-badge'>{tokens_label}</span>"
+                            st.markdown(f"<div class='char-title' style='font-size: 1.15rem;'>{name} {token_badge}</div>", unsafe_allow_html=True)
+                            if author:
+                                st.markdown(f"<div class='char-author'>by {author}</div>", unsafe_allow_html=True)
+                            
+                            # SUMMARY BOX
+                            if summary_text:
+                                safe_summary = clean_html(summary_text)
+                                st.markdown("<div class='char-preview-box' style='max-height: 200px; font-size: 0.85rem;'>", unsafe_allow_html=True)
+                                render_preview_html(safe_summary)
+                                st.markdown("</div>", unsafe_allow_html=True)
+
+                            # TAGS & DETAILS
+                            tags_raw = metadata.get('tags') if metadata else []
+                            tags_list = format_tags(tags_raw)
+                            if not tags_list and definition:
+                                dev_tags = definition.get('data', {}).get('tags') or definition.get('tags') if isinstance(definition, dict) else None
+                                if dev_tags: tags_list = format_tags(dev_tags)
+
+                            if tags_list:
+                                disp_lim = 8
+                                m_tags = tags_list[:disp_lim]
+                                if search_query and any(search_query.lower() == t.lower() for t in tags_list):
+                                    m_tag = next(t for t in tags_list if t.lower() == search_query.lower())
+                                    if m_tag not in m_tags: m_tags[-1] = m_tag
+                                
+                                tags_html = f'<div class="tags-container" style="margin-bottom: 15px;">{render_badges(m_tags)}'
+                                if len(tags_list) > disp_lim:
+                                    r_tags = [t for t in tags_list if t not in m_tags]
+                                    tags_html += f'<details class="tag-details"><summary class="tag-badge">+{len(r_tags)} weitere</summary>{render_badges(r_tags)}</details>'
+                                tags_html += '</div>'
+                                st.markdown(tags_html, unsafe_allow_html=True)
+
+                            with st.expander("📝 Details"):
+                                # Use tabs for clean detail view
+                                content_map = {}
+                                if card_data.get('description'): content_map["Desc"] = card_data['description']
+                                if card_data.get('first_mes'): content_map["First"] = card_data['first_mes']
+                                tab_names = list(content_map.keys()) + ["Info", "Raw"]
+                                t_rows = st.tabs(tab_names)
+                                t_idx = 0
+                                for k in content_map:
+                                    with t_rows[t_idx]: st.markdown(content_map[k])
+                                    t_idx += 1
+                                with t_rows[t_idx]:
+                                    st.table({"Added": added.strftime("%Y-%m-%d") if added else "?", "Source": src})
+                                    t_idx += 1
+                                with t_rows[t_idx]: st.json(metadata)
+                        
+                        # Add visual separator between cards
+                        st.markdown("<div style='margin-bottom: 20px;'></div>", unsafe_allow_html=True)
             
             # --- PAGINATION CONTROLS (Bottom) ---
             try:
@@ -1002,13 +1076,17 @@ if st.session_state.get('search_input') and st.session_state.selected_sources an
                 st.markdown(f'<p class="pag-label">S. {st.session_state.page+1} / {total_pages}</p>', unsafe_allow_html=True)
             with col_b_prev:
                  if st.session_state.page > 0:
-                     st.button("⬅️", key="prev_bottom", on_click=change_page, args=(st.session_state.page - 1,))
+                     if st.button("⬅️", key="prev_bottom"):
+                         change_page(st.session_state.page - 1)
+                         st.rerun()
             with col_b_page:
                 if total_pages > 1:
                     st.number_input("Seite", 1, total_pages, key="p_jump_b", label_visibility="collapsed", on_change=lambda: change_page(st.session_state.p_jump_b - 1))
             with col_b_next:
                  if st.session_state.page < total_pages - 1:
-                     st.button("➡️", key="next_bottom", on_click=change_page, args=(st.session_state.page + 1,))
+                     if st.button("➡️", key="next_bottom"):
+                         change_page(st.session_state.page + 1)
+                         st.rerun()
 
         except Exception as e:
             st.error(f"Fehler: {e}")

@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  charasearch:
+    build: .
+    container_name: charasearch-app
+    ports:
+      - "8501:8501"  # Streamlit
+      - "8505:8505"  # Image Server (SillyTavern Link)
+    environment:
+      # Change this to your host IP for SillyTavern access from other devices
+      - EXTERNAL_URL=http://192.168.x.x
+      # Database connection settings should match your config.py
+      # You can also pass DB_HOST, DB_NAME, etc. here if you modify config.py to use env vars
+    volumes:
+      # Map your image folder here. 
+      # Left side: Path on your host (e.g., C:\Users\...\images)
+      # Right side: Path inside the container (must match IMAGE_ROOT in config.py)
+      - ./hashed-data:/app/hashed-data:ro
+    restart: unless-stopped
