@@ -3,6 +3,9 @@ import psycopg2
 import os
 import json
 import datetime
+import time
+import math
+import re
 
 # Importieren der Konfiguration aus config.py
 try:
@@ -14,10 +17,20 @@ except ImportError:
 # --- SETUP & STYLES ---
 st.set_page_config(layout="wide", page_title="Char Archive Ultimate", page_icon="🗃️")
 
+# Handle Session State Initialization
+if "page" not in st.session_state:
+    st.session_state.page = 0
+if "p_jump" not in st.session_state:
+    st.session_state.p_jump = 1
+if "p_jump_b" not in st.session_state:
+    st.session_state.p_jump_b = 1
+
 # Check Query Params for Tag Search (Click on Badge)
 if "q" in st.query_params:
     st.session_state.search_input = st.query_params["q"]
-    st.query_params.clear()
+    st.session_state.page = 0
+    st.session_state.p_jump = 1
+    st.session_state.p_jump_b = 1
 
 st.markdown("""
 <style>
@@ -82,40 +95,134 @@ st.markdown("""
         width: 100%;
         object-fit: cover;
     }
+
+    /* Search Button Alignment - Final Fix */
+    [data-testid="stForm"] {
+        border: none !important;
+        padding: 0 !important;
+    }
+    /* Ensure the column content is centered/bottom aligned */
+    div.stButton > button {
+        margin-top: 1.5rem !important;
+        width: 100%;
+        height: 100%;
+    }
+
+    /* HTML Preview Box - Improved visibility & size */
+    .char-preview-box {
+        max-height: 500px;
+        overflow-y: auto;
+        padding: 15px;
+        background: rgba(128, 128, 128, 0.08);
+        border: 1px solid rgba(128, 128, 128, 0.2);
+        border-radius: 8px;
+        font-size: 0.95em;
+        line-height: 1.6;
+        margin-top: 10px;
+        margin-bottom: 15px;
+    }
+    .char-preview-box::-webkit-scrollbar {
+        width: 6px;
+    }
+    .char-preview-box::-webkit-scrollbar-thumb {
+        background: #555;
+        border-radius: 3px;
+    }
+    .char-preview-box::-webkit-scrollbar-track {
+        background: transparent;
+    }
+    
+    /* Pagination Layout Alignment */
+    .pag-label {
+        display: flex;
+        align-items: center;
+        height: 100%;
+        margin: 0 !important;
+        font-size: 0.85rem;
+        color: #888;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # --- FUNKTIONEN ---
+
+def clean_html(html_str):
+    """Deaktiviert Autoplay in Audio/Video Tags"""
+    if not html_str: return ""
+    # Ersetze autoplay (case-insensitive) durch data-autoplay
+    cleaned = re.sub(r'\bautoplay\b', 'data-autoplay', html_str, flags=re.IGNORECASE)
+    return cleaned
+
+def change_page(new_page):
+    """Callback für Paginierung - Synchronisiert alle States"""
+    st.session_state.page = new_page
+    st.session_state.p_jump = new_page + 1
+    st.session_state.p_jump_b = new_page + 1
 
 @st.cache_resource
 def get_db_connection():
     """Hält die DB-Verbindung offen, damit es schneller geht"""
     return psycopg2.connect(**DB_CONFIG)
 
+@st.cache_data(show_spinner=False, ttl=600)
+def run_query_cached(sql, params):
+    """Führt die Query aus und cached das Ergebnis für 10 Minuten"""
+    conn = psycopg2.connect(**DB_CONFIG)
+    cur = conn.cursor()
+    cur.execute(sql, params)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
 def get_image_path(image_hash, debug=False):
-    """Findet das Bild im Sharding-Dschungel"""
+    """Findet das Bild im Sharding-Dschungel (nun auch rekursiv)"""
     if not image_hash: return None, []
     
-    extensions = ["", ".png", ".webp", ".jpg", ".jpeg"]
+    extensions = [".png", ".webp", ".jpg", ".jpeg", ""]
     candidates = []
     
+    # Paths to check
+    checks = []
+    
+    # 0. User Specific: Split Filename Sharding (hashed-data/a/b/c/defg...)
+    # Hash: 2b2b9b... -> Path: hashed-data/2/b/2/b9b...
+    if len(image_hash) > 3:
+        checks.append(os.path.join(IMAGE_ROOT, "hashed-data", image_hash[0], image_hash[1], image_hash[2], image_hash[3:]))
+
     # 1. Nested Sharding (hashed-data/a/b/abcde...)
     if len(image_hash) >= 2:
-        base = os.path.join(IMAGE_ROOT, "hashed-data", image_hash[0], image_hash[1], image_hash)
-        candidates.extend([base + ext for ext in extensions])
+        checks.append(os.path.join(IMAGE_ROOT, "hashed-data", image_hash[0], image_hash[1], image_hash))
 
     # 2. Simple Sharding (hashed-data/a/abcde...)
     if len(image_hash) >= 1:
-        base = os.path.join(IMAGE_ROOT, "hashed-data", image_hash[0], image_hash)
-        candidates.extend([base + ext for ext in extensions])
+        checks.append(os.path.join(IMAGE_ROOT, "hashed-data", image_hash[0], image_hash))
         
     # 3. Flat (hashed-data/abcde...)
-    base = os.path.join(IMAGE_ROOT, "hashed-data", image_hash)
-    candidates.extend([base + ext for ext in extensions])
+    checks.append(os.path.join(IMAGE_ROOT, "hashed-data", image_hash))
     
-    for path in candidates:
-        if os.path.exists(path) and os.path.isfile(path):
-            return path, candidates
+    # Generate Candidate List (with Exts) for Debugging
+    for c in checks:
+        for ext in extensions:
+            candidates.append(c + ext)
+            
+    # Real Search
+    for path_base in checks:
+        # Check Direct File + Ext
+        for ext in extensions:
+            p = path_base + ext
+            if os.path.exists(p) and os.path.isfile(p):
+                return p, candidates
+
+        # Check Directory (Deep Search) - Fallback
+        if os.path.exists(path_base) and os.path.isdir(path_base):
+            if debug: candidates.append(f"[DIR FOUND] {path_base} -> Scanning...")
+            for root, _, files in os.walk(path_base):
+                for f in files:
+                    if f.lower().endswith(tuple([".png", ".webp", ".jpg", ".jpeg"])):
+                        found = os.path.join(root, f)
+                        if debug: candidates.append(f"[DEEP MATCH] {found}")
+                        return found, candidates
             
     return None, candidates
 
@@ -129,14 +236,20 @@ def format_tags(tags_data):
         try:
             tags = json.loads(tags_data)
         except:
-            tags = tags_data.split(',')
-    return [str(t).strip().replace('"', '') for t in tags if str(t).strip()]
+            if ',' in tags_data:
+                tags = tags_data.split(',')
+            else:
+                tags = [tags_data]
+    
+    # Clean up tags (remove quotes, whitespace)
+    return [str(t).strip().replace('"', '').replace("'", "") for t in tags if str(t).strip()]
 
 def render_badges(tags_list):
     html_str = ""
     for t in tags_list[:20]: 
         # Link to ?q=TAGNAME to trigger search on reload
-        html_str += f'<a href="?q={t}" target="_self" class="tag-badge">{t}</a>'
+        enc_tag = t # URL encoding happens automatically by browser usually, but simple is fine
+        html_str += f'<a href="?q={enc_tag}" target="_self" class="tag-badge">{t}</a>'
     if len(tags_list) > 20:
         html_str += f'<span class="tag-badge" style="cursor:default">+{len(tags_list)-20} more</span>'
     return html_str
@@ -144,6 +257,10 @@ def render_badges(tags_list):
 # --- HAUPTBEREICH ---
 
 st.title("🗃️ Character Archive: Local Edition")
+
+# Init Session State for Pagination
+if 'page' not in st.session_state: st.session_state.page = 0
+if 'last_query' not in st.session_state: st.session_state.last_query = ""
 
 # Sidebar
 with st.sidebar:
@@ -160,49 +277,80 @@ with st.sidebar:
         "webring": "Webring"
     }
     
-    # 1. Source Selection
-    selected_sources = st.multiselect(
-        "Quellen", 
-        options=list(source_map.keys()), 
-        format_func=lambda x: source_map[x],
-        default=["chub", "risuai", "char_tavern", "chub_lorebook"]
-    )
+    # Results limit slider - now max 250
+    limit = st.slider("Anzahl Ergebnisse", 10, 250, 20)
     
     st.divider()
     
-    # 2. Search Field Selection
-    st.subheader("Suchfelder")
-    search_options = {
-        "name": "Name",
-        "tags": "Tags",
-        "description": "Beschreibung / Summary",
-        "creator_notes": "Creator Notes",
-        "first_mes": "First Message",
-        "scenario": "Scenario",
-        "author": "Autor"
-    }
-    
-    selected_fields = st.multiselect(
-        "Suche in...",
-        options=list(search_options.keys()),
-        format_func=lambda x: search_options[x],
-        default=["name", "tags", "description", "creator_notes"]
-    )
-    
-    st.divider()
-    
-    sort_option = st.selectbox("Sortierung", ["Neueste zuerst", "Älteste zuerst", "Name (A-Z)"])
-    limit = st.slider("Anzahl Ergebnisse", 10, 100, 20)
-    
+    # Use a Form for sidebar settings to avoid immediate re-run
+    with st.form("settings_form"):
+        # 1. Source Selection
+        selected_sources = st.multiselect(
+            "Quellen", 
+            options=list(source_map.keys()), 
+            format_func=lambda x: source_map[x],
+            default=["chub", "risuai", "char_tavern", "chub_lorebook"]
+        )
+        
+        # 2. Search Field Selection
+        search_options = {
+            "name": "Name",
+            "tags": "Tags",
+            "description": "Beschreibung / Summary",
+            "creator_notes": "Creator Notes",
+            "first_mes": "First Message",
+            "scenario": "Scenario",
+            "author": "Autor"
+        }
+        
+        selected_fields = st.multiselect(
+            "Suche in...",
+            options=list(search_options.keys()),
+            format_func=lambda x: search_options[x],
+            default=["name", "tags", "description", "creator_notes"]
+        )
+        
+        sort_option = st.selectbox("Sortierung", [
+            "Neueste zuerst", 
+            "Älteste zuerst", 
+            "Name (A-Z)", 
+            "Token Count (Viel)", 
+            "Token Count (Wenig)"
+        ])
+
+        st.divider()
+        st.write("📊 Token-Filter")
+        token_range = st.slider("Token-Bereich", 0, 16000, (0, 8000), step=100)
+        unlimited_tokens = st.checkbox("Nach oben offen", value=False)
+        
+        apply_btn = st.form_submit_button("Einstellungen anwenden")
+
     st.divider()
     debug_mode = st.checkbox("Debug-Modus", value=False)
+    explain_mode = False
     if debug_mode:
         st.info(f"Root: `{IMAGE_ROOT}`")
+        explain_mode = st.checkbox("Zeige Query Plan (EXPLAIN ANALYZE)", value=False)
 
-# Search
-search_query = st.text_input("🔍 Suche...", placeholder="Suchbegriff eingeben...")
-
-# --- LOGIK ---
+# Search Input Form
+with st.form("search_form"):
+    # Using vertical_alignment="bottom" for modern Streamlit, or fallback layout
+    try:
+        col_input, col_submit = st.columns([5, 1], vertical_alignment="bottom")
+    except:
+        col_input, col_submit = st.columns([5, 1])
+    
+    with col_input:
+        search_query = st.text_input("🔍 Suche...", placeholder="Suchbegriff eingeben...", value=st.session_state.get('search_input', ""))
+    with col_submit:
+        search_btn = st.form_submit_button("Suche", use_container_width=True)
+        if search_btn:
+            st.session_state.search_input = search_query
+            st.session_state.page = 0
+            # Reset jump widgets
+            st.session_state.p_jump = 1
+            st.session_state.p_jump_b = 1
+            st.rerun()
 
 def get_json_field(path_list):
     """Helper für SQL JSON Access"""
@@ -230,33 +378,45 @@ def build_search_conditions(query_param_name):
         conditions.append("name ILIKE %s")
         
     if "author" in selected_fields:
+        # Indexed: idx_chub_author_trgm -> author
         conditions.append("author ILIKE %s")
         
     if "tags" in selected_fields:
-        # Check metadata tags (standard) and definition tags (sometimes)
+        # Check metadata tags (standard) and definition tags
         conditions.append("metadata->>'tags' ILIKE %s")
+        conditions.append("definition->>'tags' ILIKE %s")
+        conditions.append("definition->'data'->>'tags' ILIKE %s")
         
     # Complex Fields (check V1 and V2 locations)
     
     # Description
     if "description" in selected_fields:
+        # Indexed: idx_chub_desc_trgm -> definition->>'description' (for V1 Cards)
         conditions.append("definition->>'description' ILIKE %s")
         conditions.append("definition->'data'->>'description' ILIKE %s")
-        # Legacy/Other
-        conditions.append("definition->>'personality' ILIKE %s")
+        # conditions.append("definition->>'personality' ILIKE %s")
     
     # Creator Notes
     if "creator_notes" in selected_fields:
+        # Indexed: idx_chub_notes_trgm -> definition->>'creator_notes'
         conditions.append("definition->>'creator_notes' ILIKE %s")
         conditions.append("definition->'data'->>'creator_notes' ILIKE %s")
+        # Legacy/Other
+        # conditions.append("definition->>'notes' ILIKE %s")
         
     # First Mes
     if "first_mes" in selected_fields:
+        # Indexed: idx_chub_firstmes_trgm -> definition->>'first_message'
+        # CHECK: User index uses 'first_message', my code used 'first_mes'
+        conditions.append("definition->>'first_message' ILIKE %s")
+        conditions.append("definition->'data'->>'first_message' ILIKE %s")
+        # Fallback to 'first_mes' just in case
         conditions.append("definition->>'first_mes' ILIKE %s")
         conditions.append("definition->'data'->>'first_mes' ILIKE %s")
         
     # Scenario
     if "scenario" in selected_fields:
+        # Indexed: idx_chub_scenario_trgm -> definition->>'scenario'
         conditions.append("definition->>'scenario' ILIKE %s")
         conditions.append("definition->'data'->>'scenario' ILIKE %s")
         
@@ -307,9 +467,11 @@ if search_query and selected_sources and selected_fields:
     num_params = where_clause.count("%s")
     
     # Standard Fields + Full Definition
-    # 1. Name, 2. Image, 3. Source, 4. Metadata, 5. Added, 6. Author, 7. Tagline, 8. Definition
+    # 1. Name, 2. Image, 3. Source, 4. Metadata, 5. Added, 6. Author, 7. Tagline, 8. Definition, 9. tokens_count
     
-    base_select = "SELECT name, image_hash, '{src}', metadata, added, author, {tagline_expr}, definition FROM {table}"
+    # helper for tokens_count expression
+    tokens_expr = "COALESCE((metadata->>'totalTokens')::int, (metadata->>'total_token_count')::int, (definition->'data'->>'total_token_count')::int, 0)"
+    base_select = f"SELECT name, image_hash, '{{src}}', metadata, added, author, {{tagline_expr}}, definition, {tokens_expr} as tokens_count FROM {{table}}"
     
     # 1. CHUB
     if "chub" in selected_sources:
@@ -367,8 +529,8 @@ if search_query and selected_sources and selected_fields:
         num_booru = booru_str.count("%s")
         
         sql_parts.append(f"""
-            SELECT name, image_hash, 'booru', jsonb_build_object('tags', tags), added, author, tagline, 
-            jsonb_build_object('description', summary) as definition
+            SELECT name, image_hash, 'booru', jsonb_build_object('tags', tags, 'totalTokens', 0), added, author, tagline, 
+            jsonb_build_object('description', summary) as definition, 0 as tokens_count
             FROM booru_character_def 
             WHERE {booru_str}
         """)
@@ -390,23 +552,86 @@ if search_query and selected_sources and selected_fields:
 
     # --- EXECUTE ---
     if sql_parts:
-        full_sql = " UNION ALL ".join(sql_parts)
+        # Wrap everything in a subquery so we can use complex ORDER BY and WHERE with UNION
+        combined_sql = " UNION ALL ".join(sql_parts)
         
-        if sort_option == "Neueste zuerst": full_sql += " ORDER BY added DESC"
-        elif sort_option == "Älteste zuerst": full_sql += " ORDER BY added ASC"
+        # Determine Token Range Filter
+        min_tokens, max_tokens = token_range
+        if not unlimited_tokens:
+            range_cond = f"WHERE tokens_count BETWEEN {min_tokens} AND {max_tokens}"
+        else:
+            range_cond = f"WHERE tokens_count >= {min_tokens}"
+
+        # Prepare full results query with total count
+        full_count_sql = f"SELECT *, COUNT(*) OVER() as full_count FROM ({combined_sql}) AS search_results {range_cond}"
+        full_sql = full_count_sql
+        
+        # Sortierung
+        if sort_option == "Neueste zuerst": full_sql += " ORDER BY added DESC NULLS LAST"
+        elif sort_option == "Älteste zuerst": full_sql += " ORDER BY added ASC NULLS LAST"
+        elif sort_option == "Token Count (Viel)": 
+            # Nutze tokens_count column
+            full_sql += " ORDER BY tokens_count DESC"
+        elif sort_option == "Token Count (Wenig)": 
+            # Unbekannte (0) ans Ende
+            full_sql += " ORDER BY CASE WHEN tokens_count = 0 THEN 9999999 ELSE tokens_count END ASC"
         else: full_sql += " ORDER BY name ASC"
         
-        full_sql += f" LIMIT {limit}"
+        # Pagination Calculation
+        offset = st.session_state.page * limit
+        
+        full_sql += f" LIMIT {limit} OFFSET {offset}"
         
         try:
-            with st.spinner("Lade Daten..."):
-                cur.execute(full_sql, tuple(params))
-                rows = cur.fetchall()
+            # DEBUG: EXPLAIN MODE
+            if debug_mode:
+                # Show raw SQL
+                st.caption("🛠️ Generated SQL:")
+                st.code(cur.mogrify(full_sql, tuple(params)).decode('utf-8'), language="sql")
+                
+            if explain_mode:
+                explain_sql = "EXPLAIN ANALYZE " + full_sql
+                with st.expander("🔍 Database Query Plan", expanded=True):
+                    try:
+                        cur.execute(explain_sql, tuple(params))
+                        plan = cur.fetchall()
+                        plan_str = "\n".join([row[0] for row in plan])
+                        st.code(plan_str, language="sql")
+                    except Exception as ex:
+                        st.error(f"Explain fehlgeschlagen: {ex}")
+
+            with st.spinner(f"Lade Seite {st.session_state.page + 1}..."):
+                start_time = time.time()
+                # Nutze cached query um Doppel-Runs bei Download zu vermeiden
+                rows = run_query_cached(full_sql, tuple(params))
+                end_time = time.time()
+                
+                # Extract total count from window function
+                total_matches = rows[0][-1] if rows else 0
+                total_pages = math.ceil(total_matches / limit) if total_matches > 0 else 1
+                
+                st.info(f"Suche ausgeführt in {end_time - start_time:.4f} Sekunden. (Insgesamt {total_matches} Treffer)")
             
-            st.caption(f"{len(rows)} Ergebnisse")
+            # --- PAGINATION CONTROLS (Top) ---
+            try:
+                col_res, col_prev, col_page, col_next = st.columns([3, 0.6, 1.2, 0.6], vertical_alignment="center")
+            except:
+                col_res, col_prev, col_page, col_next = st.columns([3, 0.6, 1.2, 0.6])
             
-            for row in rows:
-                name, img_hash, src, metadata, added, author, tagline, definition = row
+            with col_res:
+                st.markdown(f'<p class="pag-label">S. {st.session_state.page+1} / {total_pages} ({total_matches} Treffer)</p>', unsafe_allow_html=True)
+            with col_prev:
+                if st.session_state.page > 0:
+                     st.button("⬅️", key="prev_top", on_click=change_page, args=(st.session_state.page - 1,))
+            with col_page:
+                if total_pages > 1:
+                    st.number_input("Seite", 1, total_pages, key="p_jump", label_visibility="collapsed", on_change=lambda: change_page(st.session_state.p_jump - 1))
+            with col_next:
+                 if st.session_state.page < total_pages - 1:
+                     st.button("➡️", key="next_top", on_click=change_page, args=(st.session_state.page + 1,))
+            
+            for i, row in enumerate(rows):
+                name, img_hash, src, metadata, added, author, tagline, definition, tokens_count, full_count = row
                 
                 # --- DATA PREP ---
                 real_path, checked_paths = get_image_path(img_hash, debug=debug_mode)
@@ -414,7 +639,11 @@ if search_query and selected_sources and selected_fields:
                 # Extract fields from definition
                 card_data = extract_card_data(definition) if definition else {}
                 
-                # Tags extraction (Metadata preferred, fallback to definition)
+                # Tokens
+                tokens_val = tokens_count
+                tokens_label = f"{tokens_val} Tokens" if tokens_val > 0 else "Tokens Unbekannt"
+                token_bg = "#ff4b4b" if tokens_val > 0 else "#666"
+                token_html = f"<span style='background:{token_bg}; color:#fff; padding:2px 8px; border-radius:4px; font-size:0.85em; margin-left:10px; font-weight:bold;'>{tokens_label}</span>"
                 tags_raw = metadata.get('tags') if metadata else []
                 tags_list = format_tags(tags_raw)
                 
@@ -451,12 +680,13 @@ if search_query and selected_sources and selected_fields:
                             
                         if real_path:
                              with open(real_path, "rb") as f:
-                                st.download_button("💾 PNG", f, file_name=f"{name}.png", key=f"dl_{img_hash}")
+                                st.download_button("💾 PNG", f, file_name=f"{name}.png", key=f"dl_{img_hash}_{i}")
 
                     with col2:
                         # HEADER
                         author_html = f"<span class='char-author'>by {author}</span>" if author else ""
-                        st.markdown(f"<div class='char-title'>{name} &nbsp; {author_html}</div>", unsafe_allow_html=True)
+                        
+                        st.markdown(f"<div class='char-title'>{name} &nbsp; {author_html} {token_html}</div>", unsafe_allow_html=True)
                         
                         # TAGS directly in Overview (Render limited amount)
                         if tags_list:
@@ -465,9 +695,11 @@ if search_query and selected_sources and selected_fields:
                             st.caption("⚠️ Keine Tags gefunden (Check Raw Definition)")
 
                         
-                        # SUMMARY (Creator Notes / Tagline)
+                        # SUMMARY (Creator Notes / Tagline / HTML Preview)
                         if summary_text:
-                            st.info(summary_text) # Info box for summary looks decent
+                            # Wrap in scrollable box and allow HTML, but CLEAN it from autoplay
+                            safe_summary = clean_html(summary_text)
+                            st.markdown(f"<div class='char-preview-box'>{safe_summary}</div>", unsafe_allow_html=True)
                         
                         # EXPANDER
                         with st.expander("📝 Details anzeigen"):
@@ -530,6 +762,24 @@ if search_query and selected_sources and selected_fields:
                                         st.write("Paths:", checked_paths)
 
                     st.markdown("---")
+            
+            # --- PAGINATION CONTROLS (Bottom) ---
+            try:
+                col_b_res, col_b_prev, col_b_page, col_b_next = st.columns([3, 0.6, 1.2, 0.6], vertical_alignment="center")
+            except:
+                col_b_res, col_b_prev, col_b_page, col_b_next = st.columns([3, 0.6, 1.2, 0.6])
+            
+            with col_b_res:
+                st.markdown(f'<p class="pag-label">S. {st.session_state.page+1} / {total_pages}</p>', unsafe_allow_html=True)
+            with col_b_prev:
+                 if st.session_state.page > 0:
+                     st.button("⬅️", key="prev_bottom", on_click=change_page, args=(st.session_state.page - 1,))
+            with col_b_page:
+                if total_pages > 1:
+                    st.number_input("Seite", 1, total_pages, key="p_jump_b", label_visibility="collapsed", on_change=lambda: change_page(st.session_state.p_jump_b - 1))
+            with col_b_next:
+                 if st.session_state.page < total_pages - 1:
+                     st.button("➡️", key="next_bottom", on_click=change_page, args=(st.session_state.page + 1,))
 
         except Exception as e:
             st.error(f"Fehler: {e}")
@@ -541,5 +791,3 @@ elif not selected_sources:
     st.warning("Wähle eine Quelle.")
 else:
     st.info("Suche starten...")
-
-
