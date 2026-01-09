@@ -6,6 +6,7 @@ import datetime
 import time
 import math
 import re
+import extra_streamlit_components as stx
 
 # Importieren der Konfiguration aus config.py
 try:
@@ -25,6 +26,63 @@ if "p_jump" not in st.session_state:
 if "p_jump_b" not in st.session_state:
     st.session_state.p_jump_b = 1
 
+# COOKIE MANAGEMENT - Unified approach
+# Use a static, unique key for the manager
+cookie_manager = stx.CookieManager(key="charasearch_ultimate_cookie_manager")
+cookies = cookie_manager.get_all()
+
+# Defaults
+DEFAULT_SETTINGS = {
+    "limit": 24,
+    "selected_sources": ["chub", "risuai"],
+    "selected_fields": ["tags"],
+    "token_range": [0, 8000],
+    "unlimited": False
+}
+
+# 1. Initialize session state with defaults (if not set)
+for key, val in DEFAULT_SETTINGS.items():
+    if key not in st.session_state:
+        st.session_state[key] = val
+
+# 2. Sync Logic (Browser -> session_state)
+# We wait patiently for the unified 'app_settings' cookie to arrive.
+if not st.session_state.get("cookies_initialized", False):
+    # Track when we started waiting
+    if "sync_start_time" not in st.session_state:
+        st.session_state.sync_start_time = time.time()
+    
+    elapsed = time.time() - st.session_state.sync_start_time
+
+    if cookies and "app_settings" in cookies:
+        try:
+            raw_val = cookies["app_settings"]
+            saved = raw_val if isinstance(raw_val, dict) else json.loads(raw_val)
+            
+            if saved:
+                for k in DEFAULT_SETTINGS:
+                    if k in saved:
+                        st.session_state[k] = saved[k]
+                
+                st.session_state.cookies_initialized = True
+                st.session_state["debug_sync_msg"] = f"Successfully synced after {elapsed:.2f}s."
+                st.rerun()
+        except Exception as e:
+            st.session_state.cookies_initialized = True
+            st.session_state["debug_sync_msg"] = f"Sync failed: {str(e)}"
+    else:
+        # User requested a 20s wait period
+        if elapsed < 20.0:
+            # Show a subtle loading indicator if it takes more than 1s
+            if elapsed > 1.0:
+                st.info(f"Warte auf Einstellungen... ({int(elapsed)}s / 20s)")
+            
+            time.sleep(0.1) # Prevent CPU hammering
+            st.rerun()
+        else:
+            st.session_state.cookies_initialized = True
+            st.session_state["debug_sync_msg"] = f"No settings found after {elapsed:.1f}s wait."
+
 # Check Query Params for Tag Search (Click on Badge)
 if "q" in st.query_params:
     st.session_state.search_input = st.query_params["q"]
@@ -33,113 +91,207 @@ if "q" in st.query_params:
     st.session_state.p_jump_b = 1
 
 st.markdown("""
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-    /* Global Styles */
+    /* Global Styles & Reset */
+    :root {
+        --bg-main: #0f1115;
+        --card-bg: rgba(26, 28, 35, 0.7);
+        --accent: #ff4b4b;
+        --accent-glow: rgba(255, 75, 75, 0.3);
+        --text-main: #e0e0e0;
+        --text-dim: #9ca3af;
+        --border-color: rgba(255, 255, 255, 0.1);
+        --glass-border: rgba(255, 255, 255, 0.05);
+    }
+
+    .main {
+        background-color: var(--bg-main);
+        font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    }
+
     .block-container {
-        padding-top: 2rem;
+        padding-top: 3rem;
+        max-width: 95rem;
     }
     
-    /* Card Container */
+    /* Card Container - Glassmorphism */
     .char-card {
-        background-color: #1e1e1e;
-        border: 1px solid #333;
-        border-radius: 10px;
-        padding: 15px;
-        margin-bottom: 15px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+        background: var(--card-bg);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border: 1px solid var(--glass-border);
+        border-radius: 12px;
+        padding: 20px;
+        margin-bottom: 20px;
+        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.4);
+        transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+    .char-card:hover {
+        border-color: var(--accent-glow);
+        transform: translateY(-2px);
+        box-shadow: 0 10px 40px 0 rgba(255, 75, 75, 0.1);
     }
     
     /* Typography */
     .char-title {
-        font-size: 1.4em;
-        font-weight: bold;
+        font-size: 1.5rem;
+        font-weight: 700;
         color: #fff;
-        margin-bottom: 0px;
+        margin-bottom: 4px;
+        letter-spacing: -0.02em;
     }
     .char-author {
-        font-size: 0.9em;
-        color: #aaa;
-        margin-bottom: 10px;
+        font-size: 0.85rem;
+        color: var(--text-dim);
+        font-weight: 500;
+        letter-spacing: 0.01em;
     }
     .char-tagline {
         font-style: italic;
-        color: #ddd;
-        border-left: 3px solid #ff4b4b;
-        padding-left: 10px;
-        margin: 10px 0;
+        color: #cbd5e1;
+        border-left: 2px solid var(--accent);
+        padding-left: 12px;
+        margin: 12px 0;
+        font-size: 0.95rem;
     }
     
-    /* Badges */
+    /* Badges / Tags */
     .tag-badge {
-        background-color: #262730;
-        color: #e0e0e0 !important;
-        padding: 2px 8px;
-        border-radius: 4px;
-        border: 1px solid #4a4a4a;
-        font-size: 0.75em;
-        margin-right: 4px;
-        margin-bottom: 4px;
+        background: rgba(45, 48, 58, 0.6);
+        color: #d1d5db !important;
+        padding: 4px 10px;
+        border-radius: 6px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        font-size: 0.72rem;
+        margin-right: 6px;
+        margin-bottom: 6px;
         display: inline-block;
-        font-family: monospace;
+        font-family: 'Inter', sans-serif;
+        font-weight: 600;
         text-decoration: none;
+        transition: all 0.2s ease;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
     }
     .tag-badge:hover {
-        background-color: #3e404b;
-        border-color: #ff4b4b;
+        background: var(--accent);
+        border-color: var(--accent);
         color: #fff !important;
+        transform: scale(1.05);
     }
     
     /* Images */
     .char-image-container img {
-        border-radius: 8px;
+        border-radius: 10px;
         width: 100%;
         object-fit: cover;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
     }
 
-    /* Search Button Alignment - Final Fix */
+    /* Form & Inputs */
     [data-testid="stForm"] {
+        background: transparent !important;
         border: none !important;
         padding: 0 !important;
     }
-    /* Ensure the column content is centered/bottom aligned */
+    
+    /* Buttons */
     div.stButton > button {
-        margin-top: 1.5rem !important;
-        width: 100%;
-        height: 100%;
-    }
-
-    /* HTML Preview Box - Improved visibility & size */
-    .char-preview-box {
-        max-height: 500px;
-        overflow-y: auto;
-        padding: 15px;
-        background: rgba(128, 128, 128, 0.08);
-        border: 1px solid rgba(128, 128, 128, 0.2);
+        background: rgba(45, 48, 58, 0.8);
+        color: #fff;
+        border: 1px solid var(--glass-border);
         border-radius: 8px;
-        font-size: 0.95em;
-        line-height: 1.6;
-        margin-top: 10px;
-        margin-bottom: 15px;
+        font-weight: 600;
+        padding: 0.5rem 1rem;
+        transition: all 0.2s ease;
     }
-    .char-preview-box::-webkit-scrollbar {
-        width: 6px;
-    }
-    .char-preview-box::-webkit-scrollbar-thumb {
-        background: #555;
-        border-radius: 3px;
-    }
-    .char-preview-box::-webkit-scrollbar-track {
-        background: transparent;
+    div.stButton > button:hover {
+        background: var(--accent);
+        border-color: var(--accent);
+        box-shadow: 0 0 15px var(--accent-glow);
     }
     
-    /* Pagination Layout Alignment */
+    /* Search Form Submit Button Specifics */
+    #search_form div.stButton > button {
+        margin-top: 1.5rem !important;
+    }
+
+    /* HTML Preview Box - Sleeker & Matching Theme */
+    .char-preview-box {
+        max-height: 400px;
+        overflow-y: auto;
+        padding: 16px;
+        background: rgba(0, 0, 0, 0.2);
+        border: 1px solid var(--glass-border);
+        border-radius: 10px;
+        margin-top: 12px;
+        margin-bottom: 12px;
+    }
+    .char-preview-box::-webkit-scrollbar {
+        width: 5px;
+    }
+    .char-preview-box::-webkit-scrollbar-thumb {
+        background: #333;
+        border-radius: 10px;
+    }
+    .char-preview-box::-webkit-scrollbar-thumb:hover {
+        background: var(--accent);
+    }
+    
+    /* Pagination Styles */
     .pag-label {
+        font-size: 0.8rem;
+        color: var(--text-dim);
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+
+    /* Download Buttons Custom styling for integration */
+    .stDownloadButton > button {
+        width: 100%;
+        font-size: 0.8rem !important;
+        margin-bottom: 6px !important;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+
+    /* Token Badge */
+    .token-badge {
+        background: rgba(255, 75, 75, 0.15);
+        color: var(--accent);
+        border: 1px solid var(--accent-glow);
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 0.75rem;
+        font-weight: 700;
+        margin-left: 8px;
+        display: inline-block;
+        vertical-align: middle;
+    }
+
+    /* Inline Tag Details */
+    .tags-container {
         display: flex;
+        flex-wrap: wrap;
         align-items: center;
-        height: 100%;
-        margin: 0 !important;
-        font-size: 0.85rem;
-        color: #888;
+        gap: 0; /* Gaps are handled by margins in .tag-badge */
+    }
+    .tag-details {
+        display: contents; /* Makes children participate in the outer flex box */
+    }
+    .tag-details summary {
+        list-style: none;
+        display: inline-block;
+        outline: none;
+        cursor: pointer;
+    }
+    .tag-details summary::-webkit-details-marker {
+        display: none;
+    }
+    .tag-details[open] summary {
+        display: none;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -152,6 +304,51 @@ def clean_html(html_str):
     # Ersetze autoplay (case-insensitive) durch data-autoplay
     cleaned = re.sub(r'\bautoplay\b', 'data-autoplay', html_str, flags=re.IGNORECASE)
     return cleaned
+
+def render_preview_html(content):
+    """Rendert HTML-Content in einem isolierten Iframe (st.components.v1.html) um Style-Bleeding zu verhindern."""
+    if not content: return
+    
+    # CSS für das Innere des Iframes - passend zum App-Style
+    iframe_css = """
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+    <style>
+        body {
+            background: transparent;
+            color: #d1d5db;
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            font-size: 0.9rem;
+            line-height: 1.6;
+            margin: 0;
+            padding: 0;
+        }
+        .preview-content {
+            padding: 2px;
+        }
+        ::-webkit-scrollbar {
+            width: 5px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #333;
+            border-radius: 10px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #ff4b4b;
+        }
+    </style>
+    """
+    
+    full_html = f"""
+    {iframe_css}
+    <div class="preview-content">
+        {content}
+    </div>
+    """
+    
+    # Berechne ungefähre Höhe basierend auf Content-Länge (Streamlit Iframes brauchen feste Höhe oder scrollen)
+    # Wir nutzen ein div mit overflow im app-css, aber das iframe selbst braucht auch Platz.
+    import streamlit.components.v1 as components
+    components.html(full_html, height=300, scrolling=True)
 
 def change_page(new_page):
     """Callback für Paginierung - Synchronisiert alle States"""
@@ -246,12 +443,9 @@ def format_tags(tags_data):
 
 def render_badges(tags_list):
     html_str = ""
-    for t in tags_list[:20]: 
+    for t in tags_list: 
         # Link to ?q=TAGNAME to trigger search on reload
-        enc_tag = t # URL encoding happens automatically by browser usually, but simple is fine
-        html_str += f'<a href="?q={enc_tag}" target="_self" class="tag-badge">{t}</a>'
-    if len(tags_list) > 20:
-        html_str += f'<span class="tag-badge" style="cursor:default">+{len(tags_list)-20} more</span>'
+        html_str += f'<a href="?q={t}" target="_self" class="tag-badge">{t}</a>'
     return html_str
 
 # --- HAUPTBEREICH ---
@@ -277,56 +471,75 @@ with st.sidebar:
         "webring": "Webring"
     }
     
-    # Results limit slider - now max 250
-    limit = st.slider("Anzahl Ergebnisse", 10, 250, 20)
+    # Results limit slider
+    st.slider("Anzahl Ergebnisse", 10, 250, key="limit")
     
     st.divider()
     
-    # Use a Form for sidebar settings to avoid immediate re-run
-    with st.form("settings_form"):
-        # 1. Source Selection
-        selected_sources = st.multiselect(
-            "Quellen", 
-            options=list(source_map.keys()), 
-            format_func=lambda x: source_map[x],
-            default=["chub", "risuai", "char_tavern", "chub_lorebook"]
-        )
-        
-        # 2. Search Field Selection
-        search_options = {
-            "name": "Name",
-            "tags": "Tags",
-            "description": "Beschreibung / Summary",
-            "creator_notes": "Creator Notes",
-            "first_mes": "First Message",
-            "scenario": "Scenario",
-            "author": "Autor"
-        }
-        
-        selected_fields = st.multiselect(
-            "Suche in...",
-            options=list(search_options.keys()),
-            format_func=lambda x: search_options[x],
-            default=["name", "tags", "description", "creator_notes"]
-        )
-        
-        sort_option = st.selectbox("Sortierung", [
-            "Neueste zuerst", 
-            "Älteste zuerst", 
-            "Name (A-Z)", 
-            "Token Count (Viel)", 
-            "Token Count (Wenig)"
-        ])
+    # Using DIRECT BINDING to st.session_state keys (keys match DEFAULT_SETTINGS)
+    st.multiselect(
+        "Quellen", 
+        options=list(source_map.keys()), 
+        format_func=lambda x: source_map[x],
+        key="selected_sources"
+    )
+    
+    search_options = {
+        "name": "Name",
+        "tags": "Tags",
+        "description": "Beschreibung / Summary",
+        "creator_notes": "Creator Notes",
+        "first_mes": "First Message",
+        "scenario": "Scenario",
+        "author": "Autor"
+    }
+    
+    st.multiselect(
+        "Suche in...",
+        options=list(search_options.keys()),
+        format_func=lambda x: search_options[x],
+        key="selected_fields"
+    )
+    
+    st.selectbox("Sortierung", [
+        "Neueste zuerst", 
+        "Älteste zuerst", 
+        "Name (A-Z)", 
+        "Token Count (Viel)", 
+        "Token Count (Wenig)"
+    ], key="sort_option")
 
-        st.divider()
-        st.write("📊 Token-Filter")
-        token_range = st.slider("Token-Bereich", 0, 16000, (0, 8000), step=100)
-        unlimited_tokens = st.checkbox("Nach oben offen", value=False)
+    st.divider()
+    st.write("📊 Token-Filter")
+    # We use a helper for the list->tuple conversion to satisfy slider
+    st.slider("Token-Bereich", 0, 16000, key="token_range_ui", step=100, 
+              value=tuple(st.session_state.token_range))
+    st.checkbox("Nach oben offen", key="unlimited")
+    
+    # Sync the UI-only token range back to the main state
+    st.session_state.token_range = list(st.session_state.token_range_ui)
+
+    if st.button("Einstellungen als Standard speichern", width="stretch", key="save_settings_btn"):
+        # Gather all current session_state values
+        settings_to_save = {k: st.session_state.get(k) for k in DEFAULT_SETTINGS}
         
-        apply_btn = st.form_submit_button("Einstellungen anwenden")
+        cookie_manager.set("app_settings", json.dumps(settings_to_save), 
+                          expires_at=datetime.datetime.now() + datetime.timedelta(days=365))
+        
+        st.session_state.cookies_initialized = True
+        st.success("Erfolgreich gespeichert! Die Seite lädt in Kürze neu...")
+        time.sleep(1.2) # Longer wait to ensure cookie is set in browser
+        st.rerun()
 
     st.divider()
     debug_mode = st.checkbox("Debug-Modus", value=False)
+    if debug_mode:
+        st.write("--- DEBUG PERSISTENCE ---")
+        st.write("Initialized FLAG:", st.session_state.get("cookies_initialized"))
+        st.write("Sync Msg:", st.session_state.get("debug_sync_msg", "None"))
+        st.write("Sync Waits:", st.session_state.get("sync_waits"))
+        st.write("Current Session State:", {k: st.session_state.get(k) for k in DEFAULT_SETTINGS})
+        st.write("Cookies Raw:", cookies)
     explain_mode = False
     if debug_mode:
         st.info(f"Root: `{IMAGE_ROOT}`")
@@ -343,7 +556,7 @@ with st.form("search_form"):
     with col_input:
         search_query = st.text_input("🔍 Suche...", placeholder="Suchbegriff eingeben...", value=st.session_state.get('search_input', ""))
     with col_submit:
-        search_btn = st.form_submit_button("Suche", use_container_width=True)
+        search_btn = st.form_submit_button("Suche", width="stretch")
         if search_btn:
             st.session_state.search_input = search_query
             st.session_state.page = 0
@@ -366,59 +579,46 @@ def get_json_field(path_list):
         sql_frag += f"{arrow}'{key}'"
     return sql_frag
 
-def build_search_conditions(query_param_name):
-    """Baut die WHERE Conditions basierend auf selected_fields"""
-    if not selected_fields: return "1=1" # Fallback
+def build_search_conditions(fields_to_search):
+    """Baut die WHERE Conditions basierend auf fields_to_search"""
+    if not fields_to_search: return "1=1"
     
     conditions = []
     
-    # Mapping Field -> SQL Expression(s) (COALESCE Logic handled via OR checking mostly)
+    # For Tags, we use Regex with boundaries (\y) by default for precision
+    tag_op = "~*"
+    tag_fmt = lambda col: f"{col} {tag_op} %s"
     
-    if "name" in selected_fields:
-        conditions.append("name ILIKE %s")
-        
-    if "author" in selected_fields:
-        # Indexed: idx_chub_author_trgm -> author
-        conditions.append("author ILIKE %s")
-        
-    if "tags" in selected_fields:
-        # Check metadata tags (standard) and definition tags
-        conditions.append("metadata->>'tags' ILIKE %s")
-        conditions.append("definition->>'tags' ILIKE %s")
-        conditions.append("definition->'data'->>'tags' ILIKE %s")
-        
-    # Complex Fields (check V1 and V2 locations)
+    # For other fields, we use standard ILIKE for flexibility
+    def_fmt = lambda col: f"{col} ILIKE %s"
     
-    # Description
-    if "description" in selected_fields:
-        # Indexed: idx_chub_desc_trgm -> definition->>'description' (for V1 Cards)
-        conditions.append("definition->>'description' ILIKE %s")
-        conditions.append("definition->'data'->>'description' ILIKE %s")
-        # conditions.append("definition->>'personality' ILIKE %s")
+    if "name" in fields_to_search:
+        conditions.append(def_fmt("name"))
+        
+    if "author" in fields_to_search:
+        conditions.append(def_fmt("author"))
+        
+    if "tags" in fields_to_search:
+        # Use Regex boundaries specifically for tags to avoid 'ntr' in 'country'
+        conditions.append(tag_fmt("metadata->>'tags'"))
+        conditions.append(tag_fmt("definition->>'tags'"))
+        conditions.append(tag_fmt("definition->'data'->>'tags'"))
+        
+    if "description" in fields_to_search:
+        conditions.append(def_fmt("definition->>'description'"))
+        conditions.append(def_fmt("definition->'data'->>'description'"))
     
-    # Creator Notes
-    if "creator_notes" in selected_fields:
-        # Indexed: idx_chub_notes_trgm -> definition->>'creator_notes'
-        conditions.append("definition->>'creator_notes' ILIKE %s")
-        conditions.append("definition->'data'->>'creator_notes' ILIKE %s")
-        # Legacy/Other
-        # conditions.append("definition->>'notes' ILIKE %s")
+    if "creator_notes" in fields_to_search:
+        conditions.append(def_fmt("definition->>'creator_notes'"))
+        conditions.append(def_fmt("definition->'data'->>'creator_notes'"))
         
-    # First Mes
-    if "first_mes" in selected_fields:
-        # Indexed: idx_chub_firstmes_trgm -> definition->>'first_message'
-        # CHECK: User index uses 'first_message', my code used 'first_mes'
-        conditions.append("definition->>'first_message' ILIKE %s")
-        conditions.append("definition->'data'->>'first_message' ILIKE %s")
-        # Fallback to 'first_mes' just in case
-        conditions.append("definition->>'first_mes' ILIKE %s")
-        conditions.append("definition->'data'->>'first_mes' ILIKE %s")
+    if "first_mes" in fields_to_search:
+        conditions.append(def_fmt("definition->>'first_message'"))
+        conditions.append(def_fmt("definition->'data'->>'first_message'"))
         
-    # Scenario
-    if "scenario" in selected_fields:
-        # Indexed: idx_chub_scenario_trgm -> definition->>'scenario'
-        conditions.append("definition->>'scenario' ILIKE %s")
-        conditions.append("definition->'data'->>'scenario' ILIKE %s")
+    if "scenario" in fields_to_search:
+        conditions.append(def_fmt("definition->>'scenario'"))
+        conditions.append(def_fmt("definition->'data'->>'scenario'"))
         
     return " OR ".join(conditions)
 
@@ -455,78 +655,100 @@ def extract_card_data(definition):
     
     return data
 
-if search_query and selected_sources and selected_fields:
+if st.session_state.get('search_input') and st.session_state.selected_sources and st.session_state.selected_fields:
+    # --- ROBUST VARIABLE ALIASING ---
+    # We map state to locals to prevent any remaining NameErrors and keep logic clean
+    selected_sources = st.session_state.selected_sources
+    selected_fields = st.session_state.selected_fields
+    limit = st.session_state.limit
+    sort_option = st.session_state.sort_option
+    token_range = st.session_state.token_range
+    unlimited_tokens = st.session_state.unlimited
+    
+    search_query = st.session_state.search_input
     conn = get_db_connection()
     cur = conn.cursor()
     
     sql_parts = []
     params = []
     
-    where_clause = build_search_conditions("search_query")
-    # Count how many placeholders (%) are in the where_clause
-    num_params = where_clause.count("%s")
+    where_clause = build_search_conditions(st.session_state.selected_fields)
     
+    # We need to wrap TAG and NON-TAG params differently
+    tag_param = f"\\y{search_query}\\y"
+    def_param = f"%{search_query}%"
+    
+    # Identify which field each %s belongs to
+    chub_params = []
+    if "name" in selected_fields: chub_params.append(def_param)
+    if "author" in selected_fields: chub_params.append(def_param)
+    if "tags" in selected_fields: 
+        chub_params.extend([tag_param] * 3) # metadata, definition, data->tags
+    if "description" in selected_fields: chub_params.extend([def_param] * 2)
+    if "creator_notes" in selected_fields: chub_params.extend([def_param] * 2)
+    if "first_mes" in selected_fields: chub_params.extend([def_param] * 2)
+    if "scenario" in selected_fields: chub_params.extend([def_param] * 2)
+
     # Standard Fields + Full Definition
     # 1. Name, 2. Image, 3. Source, 4. Metadata, 5. Added, 6. Author, 7. Tagline, 8. Definition, 9. tokens_count
     
     # helper for tokens_count expression
     tokens_expr = "COALESCE((metadata->>'totalTokens')::int, (metadata->>'total_token_count')::int, (definition->'data'->>'total_token_count')::int, 0)"
     base_select = f"SELECT name, image_hash, '{{src}}', metadata, added, author, {{tagline_expr}}, definition, {tokens_expr} as tokens_count FROM {{table}}"
-    
+
     # 1. CHUB
-    if "chub" in selected_sources:
+    if "chub" in st.session_state.selected_sources:
         q = base_select.format(src="chub", tagline_expr="NULL", table="chub_character_def")
         q += f" WHERE {where_clause}"
         sql_parts.append(q)
-        params.extend([f'%{search_query}%'] * num_params)
+        params.extend(chub_params)
 
     # 2. RISU
-    if "risuai" in selected_sources:
+    if "risuai" in st.session_state.selected_sources:
         q = base_select.format(src="risuai", tagline_expr="NULL", table="risuai_character_def")
         q += f" WHERE {where_clause}"
         sql_parts.append(q)
-        params.extend([f'%{search_query}%'] * num_params)
+        params.extend(chub_params)
 
     # 3. TAVERN
-    if "char_tavern" in selected_sources:
+    if "char_tavern" in st.session_state.selected_sources:
         q = base_select.format(src="tavern", tagline_expr="NULL", table="char_tavern_character_def")
         q += f" WHERE {where_clause}"
         sql_parts.append(q)
-        params.extend([f'%{search_query}%'] * num_params)
+        params.extend(chub_params)
 
     # 4. GENERIC
-    if "generic" in selected_sources:
+    if "generic" in st.session_state.selected_sources:
         q = base_select.format(src="generic", tagline_expr="tagline", table="generic_character_def")
         q += f" WHERE {where_clause}"
         sql_parts.append(q)
-        params.extend([f'%{search_query}%'] * num_params)
+        params.extend(chub_params)
     
     # 5. LOREBOOKS
-    if "chub_lorebook" in selected_sources:
+    if "chub_lorebook" in st.session_state.selected_sources:
         q = base_select.format(src="lorebook", tagline_expr="NULL", table="chub_lorebook_def")
         q += f" WHERE {where_clause}"
         sql_parts.append(q)
-        params.extend([f'%{search_query}%'] * num_params)
+        params.extend(chub_params)
 
-    # 6. BOORU - Special Handling (Summary as Description substitute, tags array)
-    if "booru" in selected_sources:
-        # Booru hat kein 'definition' JSONB wie die anderen, sondern festes Schema. 
-        # Wir simulieren ein definition object für consistency
-        # Tagline ist vorhanden.
-        
-        # Mapping für Search Logic ist trickier hier. Wir vereinfachen:
-        # Booru hat: name, summary, tagline, author, tags
+    # 6. BOORU
+    if "booru" in st.session_state.selected_sources:
         booru_conds = []
-        if "name" in selected_fields: booru_conds.append("name ILIKE %s")
-        if "author" in selected_fields: booru_conds.append("author ILIKE %s")
-        if "description" in selected_fields: booru_conds.append("summary ILIKE %s") # Summary = Desc
-        if "tags" in selected_fields: booru_conds.append("array_to_string(tags, ',') ILIKE %s")
-        if "scenario" in selected_fields: booru_conds.append("FALSE") # Gibts nicht
+        # Booru uses Regex boundaries for Tags by default
+        if "name" in st.session_state.selected_fields: booru_conds.append("name ILIKE %s")
+        if "author" in st.session_state.selected_fields: booru_conds.append("author ILIKE %s")
+        if "description" in st.session_state.selected_fields: booru_conds.append("summary ILIKE %s")
+        if "tags" in st.session_state.selected_fields: booru_conds.append("array_to_string(tags, ',') ~* %s")
         
         if not booru_conds: booru_str = "FALSE"
         else: booru_str = " OR ".join(booru_conds)
         
-        num_booru = booru_str.count("%s")
+        # Build Booru Params
+        booru_params = []
+        if "name" in st.session_state.selected_fields: booru_params.append(def_param)
+        if "author" in st.session_state.selected_fields: booru_params.append(def_param)
+        if "description" in st.session_state.selected_fields: booru_params.append(def_param)
+        if "tags" in st.session_state.selected_fields: booru_params.append(tag_param)
         
         sql_parts.append(f"""
             SELECT name, image_hash, 'booru', jsonb_build_object('tags', tags, 'totalTokens', 0), added, author, tagline, 
@@ -534,21 +756,21 @@ if search_query and selected_sources and selected_fields:
             FROM booru_character_def 
             WHERE {booru_str}
         """)
-        params.extend([f'%{search_query}%'] * num_booru)
+        params.extend(booru_params)
 
     # 7. NYAIME
-    if "nyaime" in selected_sources:
+    if "nyaime" in st.session_state.selected_sources:
         q = base_select.format(src="nyaime", tagline_expr="NULL", table="nyaime_character_def")
         q += f" WHERE {where_clause}"
         sql_parts.append(q)
-        params.extend([f'%{search_query}%'] * num_params)
+        params.extend(chub_params)
 
     # 8. WEBRING
     if "webring" in selected_sources:
         q = base_select.format(src="webring", tagline_expr="tagline", table="webring_character_def")
         q += f" WHERE {where_clause}"
         sql_parts.append(q)
-        params.extend([f'%{search_query}%'] * num_params)
+        params.extend(chub_params)
 
     # --- EXECUTE ---
     if sql_parts:
@@ -567,20 +789,21 @@ if search_query and selected_sources and selected_fields:
         full_sql = full_count_sql
         
         # Sortierung
-        if sort_option == "Neueste zuerst": full_sql += " ORDER BY added DESC NULLS LAST"
-        elif sort_option == "Älteste zuerst": full_sql += " ORDER BY added ASC NULLS LAST"
-        elif sort_option == "Token Count (Viel)": 
+        s_opt = st.session_state.sort_option
+        if s_opt == "Neueste zuerst": full_sql += " ORDER BY added DESC NULLS LAST"
+        elif s_opt == "Älteste zuerst": full_sql += " ORDER BY added ASC NULLS LAST"
+        elif s_opt == "Token Count (Viel)": 
             # Nutze tokens_count column
             full_sql += " ORDER BY tokens_count DESC"
-        elif sort_option == "Token Count (Wenig)": 
+        elif s_opt == "Token Count (Wenig)": 
             # Unbekannte (0) ans Ende
             full_sql += " ORDER BY CASE WHEN tokens_count = 0 THEN 9999999 ELSE tokens_count END ASC"
         else: full_sql += " ORDER BY name ASC"
         
         # Pagination Calculation
-        offset = st.session_state.page * limit
+        offset = st.session_state.page * st.session_state.limit
         
-        full_sql += f" LIMIT {limit} OFFSET {offset}"
+        full_sql += f" LIMIT {st.session_state.limit} OFFSET {offset}"
         
         try:
             # DEBUG: EXPLAIN MODE
@@ -630,6 +853,11 @@ if search_query and selected_sources and selected_fields:
                  if st.session_state.page < total_pages - 1:
                      st.button("➡️", key="next_top", on_click=change_page, args=(st.session_state.page + 1,))
             
+            # --- RENDER RESULTS IN GRID ---
+            # Create a 2-column layout for the cards
+            # Adjust columns to be equal if window is wide
+            cols = st.columns(2)
+            
             for i, row in enumerate(rows):
                 name, img_hash, src, metadata, added, author, tagline, definition, tokens_count, full_count = row
                 
@@ -639,23 +867,6 @@ if search_query and selected_sources and selected_fields:
                 # Extract fields from definition
                 card_data = extract_card_data(definition) if definition else {}
                 
-                # Tokens
-                tokens_val = tokens_count
-                tokens_label = f"{tokens_val} Tokens" if tokens_val > 0 else "Tokens Unbekannt"
-                token_bg = "#ff4b4b" if tokens_val > 0 else "#666"
-                token_html = f"<span style='background:{token_bg}; color:#fff; padding:2px 8px; border-radius:4px; font-size:0.85em; margin-left:10px; font-weight:bold;'>{tokens_label}</span>"
-                tags_raw = metadata.get('tags') if metadata else []
-                tags_list = format_tags(tags_raw)
-                
-                if not tags_list and definition:
-                     # Fallback: Check definition -> data -> tags
-                     def_tags = None
-                     if isinstance(definition, dict):
-                         def_tags = definition.get('data', {}).get('tags') or definition.get('tags')
-                     
-                     if def_tags:
-                         tags_list = format_tags(def_tags)
-
                 # Summary Text (Creator Notes preferred, else Tagline, else Desc Truncated)
                 summary_text = card_data.get('creator_notes') or ""
                 if not summary_text: summary_text = tagline or ""
@@ -668,100 +879,118 @@ if search_query and selected_sources and selected_fields:
                     else:
                         summary_text = first_sentence[:200] + "..."
                 
-                # --- UI CARD ---
-                with st.container():
-                    col1, col2 = st.columns([1, 4])
+                # Render in alternating columns
+                with cols[i % 2]:
+                    # --- UI CARD ---
+                    st.markdown("<div class='char-card'>", unsafe_allow_html=True)
                     
-                    with col1:
+                    # Inside the card, we still use columns for Image vs Text
+                    # Use a wider split for image/buttons in grid
+                    c1, c2 = st.columns([1.8, 4])
+                    
+                    with c1:
                         if real_path:
-                            st.image(real_path, use_container_width=True)
+                            # st.image width='stretch' resolves the deprecation warning
+                            st.image(real_path, width='stretch')
                         else:
                             st.markdown(f"🖼️ *Bild fehlt*\n\n`{img_hash[:6]}`")
                             
+                        # Sub-columns for buttons side-by-side with small gap
+                        btn_col1, btn_col2 = st.columns(2, gap="small")
+                        
                         if real_path:
                              with open(real_path, "rb") as f:
-                                st.download_button("💾 PNG", f, file_name=f"{name}.png", key=f"dl_{img_hash}_{i}")
+                                with btn_col1:
+                                    st.download_button("💾 PNG", f, file_name=f"{name}.png", key=f"dl_{img_hash}_{i}")
+                        
+                        # JSON Download Button
+                        if definition:
+                            json_str = json.dumps(definition, indent=2, ensure_ascii=False)
+                            with btn_col2:
+                                st.download_button("💾 JSON", json_str, file_name=f"{name}.json", mime="application/json", key=f"dl_json_{img_hash}_{i}")
 
-                    with col2:
+                    with c2:
                         # HEADER
+                        # Tokens
+                        tokens_val = tokens_count
+                        tokens_label = f"{tokens_val} T" if tokens_val > 0 else "0 T"
+                        token_html = f"<span class='token-badge'>{tokens_label}</span>"
+                        
                         author_html = f"<span class='char-author'>by {author}</span>" if author else ""
                         
-                        st.markdown(f"<div class='char-title'>{name} &nbsp; {author_html} {token_html}</div>", unsafe_allow_html=True)
+                        st.markdown(f"<div class='char-title' style='font-size: 1.2rem;'>{name} {token_html}</div>", unsafe_allow_html=True)
+                        if author_html:
+                            st.markdown(author_html, unsafe_allow_html=True)
                         
-                        # TAGS directly in Overview (Render limited amount)
-                        if tags_list:
-                            st.markdown(render_badges(tags_list[:12]), unsafe_allow_html=True)
-                        elif debug_mode:
-                            st.caption("⚠️ Keine Tags gefunden (Check Raw Definition)")
-
-                        
-                        # SUMMARY (Creator Notes / Tagline / HTML Preview)
+                        # SUMMARY (HTML Preview - smaller in grid)
                         if summary_text:
-                            # Wrap in scrollable box and allow HTML, but CLEAN it from autoplay
                             safe_summary = clean_html(summary_text)
-                            st.markdown(f"<div class='char-preview-box'>{safe_summary}</div>", unsafe_allow_html=True)
+                            st.markdown("<div class='char-preview-box' style='max-height: 250px;'>", unsafe_allow_html=True)
+                            render_preview_html(safe_summary)
+                            st.markdown("</div>", unsafe_allow_html=True)
+                            
+                        # TAGS (Render even fewer in grid to save space)
+                        tags_raw = metadata.get('tags') if metadata else []
+                        tags_list = format_tags(tags_raw)
+                        if not tags_list and definition:
+                            def_tags = None
+                            if isinstance(definition, dict):
+                                def_tags = definition.get('data', {}).get('tags') or definition.get('tags')
+                            if def_tags:
+                                tags_list = format_tags(def_tags)
+
+                        if tags_list:
+                            # Show first 8 tags, prioritizing the search match if it exists
+                            display_limit = 8
+                            main_tags = tags_list[:display_limit]
+                            
+                            if search_query and any(search_query.lower() == t.lower() for t in tags_list):
+                                matching_tag = next(t for t in tags_list if t.lower() == search_query.lower())
+                                if matching_tag not in main_tags:
+                                    main_tags[-1] = matching_tag
+                            
+                            tags_html = f'<div class="tags-container">{render_badges(main_tags)}'
+                            
+                            # If there are more tags, make them expandable INLINE
+                            if len(tags_list) > display_limit:
+                                remaining_tags = [t for t in tags_list if t not in main_tags]
+                                more_html = render_badges(remaining_tags)
+                                tags_html += f"""
+                                <details class="tag-details">
+                                    <summary class="tag-badge">+{len(remaining_tags)} weitere</summary>
+                                    {more_html}
+                                </details>
+                                """
+                            
+                            tags_html += '</div>'
+                            st.markdown(tags_html, unsafe_allow_html=True)
                         
                         # EXPANDER
-                        with st.expander("📝 Details anzeigen"):
-                            
-                            tabs = []
-                            tab_names = []
-                            
-                            # Logik: Nur Tabs erstellen für Content der da ist
+                        with st.expander("📝 Details"):
                             content_map = {}
-                            
                             if card_data.get('description'): 
-                                content_map["Beschreibung"] = card_data['description']
+                                content_map["Desc"] = card_data['description']
                             if card_data.get('first_mes'): 
-                                content_map["First Message"] = card_data['first_mes']
-                            if card_data.get('scenario'): 
-                                content_map["Scenario"] = card_data['scenario']
+                                content_map["First"] = card_data['first_mes']
                                 
-                            # Immer da: Node Info, Metadata
-                            
-                            if content_map:
-                                tab_names.extend(content_map.keys())
-                            
-                            tab_names.extend(["Node Info", "Raw Metadata"])
-                            
+                            tab_names = list(content_map.keys()) + ["Info", "Raw"]
                             current_tabs = st.tabs(tab_names)
                             
-                            # Content füllen
                             idx = 0
-                            
-                            # 1. Content Text Tabs
                             for key in content_map:
                                 with current_tabs[idx]:
                                     st.markdown(content_map[key])
                                 idx += 1
                                 
-                            # 2. Node Info
                             with current_tabs[idx]:
-                                info_data = {
-                                    "Added": added.strftime("%Y-%m-%d %H:%M") if added else "Unknown",
-                                    "Source": src,
-                                }
-                                if metadata:
-                                    if 'total_token_count' in metadata: info_data['Tokens'] = metadata['total_token_count']
-                                    if 'star_count' in metadata: info_data['Stars'] = metadata['star_count']
-                                    if 'download_count' in metadata: info_data['Downloads'] = metadata['download_count']
-                                    if 'date_last_updated' in metadata: info_data['Updated'] = metadata['date_last_updated']
+                                info_data = {"Added": added.strftime("%y-%m-%d") if added else "?", "Src": src}
                                 st.table(info_data)
                                 idx += 1
                                 
-                            # 3. Raw Metadata (+ Definition Debug)
                             with current_tabs[idx]:
-                                col_meta, col_def = st.columns(2)
-                                with col_meta:
-                                    st.caption("Metadata")
-                                    st.json(metadata)
-                                with col_def:
-                                    st.caption("Definition (JSON)")
-                                    st.json(definition)
-                                    if debug_mode: 
-                                        st.write("Paths:", checked_paths)
+                                st.json(metadata)
 
-                    st.markdown("---")
+                    st.markdown("</div>", unsafe_allow_html=True)
             
             # --- PAGINATION CONTROLS (Bottom) ---
             try:
@@ -787,7 +1016,7 @@ if search_query and selected_sources and selected_fields:
 
     cur.close()
 
-elif not selected_sources:
+elif not st.session_state.selected_sources:
     st.warning("Wähle eine Quelle.")
 else:
     st.info("Suche starten...")
