@@ -1,0 +1,16 @@
+# Python internals
+__pycache__/
+*.pyc
+
+# Virtual Environment
+.venv/
+
+
+# Local configuration / Secrets
+config.py
+.env
+.streamlit/secrets.toml
+
+# OS Files
+.DS_Store
+Thumbs.db
