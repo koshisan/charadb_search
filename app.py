@@ -9,6 +9,7 @@ import re
 import socket
 import threading
 from http.server import HTTPServer, SimpleHTTPRequestHandler
+from image_server import start_image_server
 import extra_streamlit_components as stx
 from streamlit_scroll_to_top import scroll_to_here
 
@@ -423,54 +424,7 @@ def render_preview_html(content):
     import streamlit.components.v1 as components
     components.html(full_html, height=300, scrolling=True)
 
-@st.cache_resource
-def start_image_server(root_path, port=8505):
-    """Startet einen minimalen Background-Server für direkten PNG-Zugriff (ST Import)"""
-    
-    # Priority: Environment variable (useful for Docker/Reverse Proxy)
-    # Format expected: "http://192.168.1.10" or "https://my-archive.com"
-    external_url = os.environ.get("EXTERNAL_URL")
-    
-    if external_url:
-        # We assume the user provided the full base URL without trailing slash
-        base_host = external_url.rstrip("/")
-    else:
-        # Auto-detect Local IP
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            local_ip = s.getsockname()[0]
-            s.close()
-        except:
-            local_ip = "localhost"
-        base_host = f"http://{local_ip}:{port}"
-
-    class RootHandler(SimpleHTTPRequestHandler):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, directory=root_path, **kwargs)
-            
-        def translate_path(self, path):
-            # Standard Path Translation
-            original_path = super().translate_path(path)
-            
-            # If the file doesn't exist AND it ends with .png, try the extension-less version
-            if not os.path.exists(original_path) and original_path.lower().endswith(".png"):
-                no_ext_path = original_path[:-4]
-                if os.path.exists(no_ext_path):
-                    return no_ext_path
-            
-            return original_path
-
-        def log_message(self, format, *args):
-            return # Silent
-            
-    try:
-        server = HTTPServer(('0.0.0.0', port), RootHandler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        return base_host
-    except Exception as e:
-        return f"Error: {e}"
+# start_image_server is now imported from image_server.py
 
 def change_page(new_page):
     """Callback für Paginierung - Synchronisiert alle States"""
