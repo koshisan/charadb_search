@@ -11,13 +11,20 @@ import threading
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from image_server import start_image_server
 import extra_streamlit_components as stx
-from streamlit_scroll_to_top import scroll_to_here
+import urllib.request
+import urllib.error
+import streamlit.components.v1 as components
 
 # Importieren der Konfiguration aus config.py
+# Importieren der Konfiguration aus config.py
 try:
-    from config import IMAGE_ROOT, DB_CONFIG
+    import config
+    IMAGE_ROOT = config.IMAGE_ROOT
+    DB_CONFIG = config.DB_CONFIG
+    # Optional config
+    IMAGE_SERVER_BASE_URL = getattr(config, "IMAGE_SERVER_BASE_URL", None)
 except ImportError:
-    st.error("Konfigurationsdatei 'config.py' nicht gefunden. Bitte erstelle sie basierend auf dem Beispiel.")
+    st.error("Konfigurationsdatei 'config.py' nicht gefunden oder fehlerhaft. Bitte erstelle sie basierend auf dem Beispiel.")
     st.stop()
 
 # --- SETUP & STYLES ---
@@ -329,6 +336,53 @@ st.markdown("""
         border-color: var(--accent) !important;
         box-shadow: 0 0 10px var(--accent-glow) !important;
     }
+    
+    /* Image Overlay & Badges */
+    .image-wrapper {
+        position: relative;
+        display: inline-block;
+        width: 100%;
+        border-radius: 10px;
+        overflow: hidden;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+    .image-wrapper img {
+        width: 100%;
+        display: block;
+        object-fit: cover;
+    }
+    .badge-overlay {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        z-index: 10;
+        pointer-events: none;
+    }
+    .safety-badge {
+        background: rgba(0, 0, 0, 0.85);
+        color: #fff;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 0.7rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        border: 1px solid rgba(255, 75, 75, 0.4);
+        box-shadow: 0 2px 4px rgba(0,0,0,0.5);
+    }
+    .safety-badge.loli {
+        background: rgba(255, 0, 0, 0.9);
+        border-color: #ff0000;
+        animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+        0% { box-shadow: 0 0 0 0 rgba(255, 0, 0, 0.7); }
+        70% { box-shadow: 0 0 0 10px rgba(255, 0, 0, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(255, 0, 0, 0); }
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -498,6 +552,43 @@ def get_image_path(image_hash, debug=False):
             
     return None, candidates
 
+def get_safety_badges(metadata):
+    """Extrahiert Safety-Badges aus Metadata"""
+    if not metadata: return []
+    
+    badges = []
+    safety = metadata.get('safety', {})
+    
+    # 1. Bad Shit
+    bad = safety.get('bad_shit', {})
+    if bad.get('loli'): badges.append({'label': 'LOLI', 'class': 'loli'})
+    
+    # 2. Categories
+    cats = safety.get('categories', {})
+    # Map key -> Label
+    cat_map = {
+        'sexual': 'Sexual',
+        'violence': 'Violence',
+        'hate': 'Hate',
+        'self_harm': 'Self Harm',
+        'harassment': 'Harass',
+        'sexual_minors': 'Minors',
+        'violence_graphic': 'Gore'
+    }
+    
+    for key, label in cat_map.items():
+        if cats.get(key): # If value is not None/False/Empty
+            badges.append({'label': label, 'class': ''})
+            
+    # 3. Legacy / Tags
+    tags = metadata.get('tags', []) or []
+    if isinstance(tags, str): tags = [tags]
+    # Simple check for explicit NSFW tag if no detailed safety
+    if not badges and (metadata.get('nsfw') or any(str(t).lower() in ['nsfw', 'r-18', 'x-rated'] for t in tags)):
+        badges.append({'label': 'NSFW', 'class': ''})
+        
+    return badges
+
 def format_tags(tags_data):
     """Parsed Tags und gibt sie als Liste zurück"""
     if not tags_data: return []
@@ -529,6 +620,8 @@ def render_badges(tags_list):
 img_server_url = start_image_server(IMAGE_ROOT)
 
 # Use markdown instead of st.title to avoid phantom container
+# Position this absolutely at the very top of the app
+st.markdown('<div id="top-marker" style="position: absolute; top: 0; left: 0; height: 1px; width: 1px; z-index: -1;"></div>', unsafe_allow_html=True)
 st.markdown("# 🗃️ Character Archive: Local Edition")
 
 # Init Session State for Pagination
@@ -907,9 +1000,31 @@ if st.session_state.get('search_input') and st.session_state.selected_sources an
                 total_pages = math.ceil(total_matches / limit) if total_matches > 0 else 1
             
             # Mark this position as scroll target for page changes
-            st.write(f"🔍 DEBUG: Calling scroll_to_here at page {st.session_state.page + 1}")
-            scroll_to_here(key="results_top")
-            st.write("✅ DEBUG: scroll_to_here called")
+            # We use a simple JS injection to force scroll to top
+            # STRAEGY CHANGE: Use scrollIntoView on the #top-marker element we created earlier
+            js = f"""
+            <script>
+                // Page: {st.session_state.page} - {time.time()}
+                try {{
+                    // 1. Try scrolling the view container (Streamlit specific)
+                    var viewContainer = window.parent.document.querySelector('[data-testid="stAppViewContainer"]');
+                    if (viewContainer) {{
+                        viewContainer.scrollTop = 0;
+                        console.log("Scrolled view container to 0");
+                    }}
+                    
+                    // 2. Also try scrolling to the marker as backup
+                    var marker = window.parent.document.getElementById("top-marker");
+                    if (marker) {{
+                        marker.scrollIntoView({{behavior: "auto", block: "start"}});
+                        console.log("Scrolled to marker");
+                    }} 
+                }} catch (e) {{
+                    console.log("Scroll failed: " + e);
+                }}
+            </script>
+            """
+            components.html(js, height=0, width=0)
             
             # --- RENDER RESULTS IN GRID ---
             # Use 2-column rows for perfectly aligned starting heights
@@ -939,27 +1054,69 @@ if st.session_state.get('search_input') and st.session_state.selected_sources an
                         c1, c2 = st.columns([2, 4.5])
                         
                         with c1:
+                            # 1. URL Resolution
+                            # 1. URL Resolution
+                            # PRIORITY 1: Configured Base URL
+                            if IMAGE_SERVER_BASE_URL:
+                                srv_url = IMAGE_SERVER_BASE_URL
+                            # PRIORITY 2: Auto-detected URL from verify_server functionality
+                            elif img_server_url and not img_server_url.startswith("Error"):
+                                srv_url = img_server_url
+                            # PRIORITY 3: Fallback logic
+                            else:
+                                srv_url = f"http://{socket.gethostname()}:{8505}"
+                            direct_url = None
+                            
                             if real_path:
+                                rel_path = os.path.relpath(real_path, IMAGE_ROOT).replace("\\", "/")
+                                direct_url = f"{srv_url}/{rel_path}"
+                                # Ensure extension for server (it strips it, but usually browsers like extensions)
+                                if not direct_url.lower().endswith((".png", ".webp", ".jpg", ".jpeg")):
+                                    direct_url += ".png"
+                            
+                            # 2. Render Image with Overlay
+                            if direct_url:
+                                badges = get_safety_badges(metadata)
+                                
+                                img_html = f'<div class="image-wrapper"><img src="{direct_url}" />'
+                                
+                                if badges:
+                                    badge_html = ""
+                                    for b in badges:
+                                        badge_html += f'<div class="safety-badge {b["class"]}">{b["label"]}</div>'
+                                    
+                                    img_html += f'<div class="badge-overlay">{badge_html}</div>'
+                                
+                                img_html += '</div>'
+                                
+                                st.markdown(img_html, unsafe_allow_html=True)
+                            elif real_path:
                                 st.image(real_path, width='stretch')
                             else:
                                 st.markdown(f"🖼️ *Bild fehlt*\n\n`{img_hash[:6]}`")
                             
                             # Row 1: Downloads
                             b1, b2 = st.columns(2, gap="small")
-                            if real_path:
-                                 with open(real_path, "rb") as f:
-                                    with b1: st.download_button("💾 PNG", f, file_name=f"{name}.png", key=f"dl_{img_hash}_{idx}")
+                            if real_path and direct_url:
+                                # Fetch from server to get embedded metadata
+                                file_data = None
+                                try:
+                                    with urllib.request.urlopen(direct_url) as response:
+                                        file_data = response.read()
+                                except:
+                                    # Fallback to local file (no metadata but better than nothing)
+                                    with open(real_path, "rb") as f:
+                                        file_data = f.read()
+                                
+                                if file_data:
+                                    with b1: st.download_button("💾 PNG", file_data, file_name=f"{name}.png", key=f"dl_{img_hash}_{idx}")
+                            
                             if definition:
                                 json_str = json.dumps(definition, indent=2, ensure_ascii=False)
                                 with b2: st.download_button("💾 JSON", json_str, file_name=f"{name}.json", key=f"dl_json_{img_hash}_{idx}")
 
                             # Row 2: SillyTavern Link (using st.code for reliable copy)
-                            if real_path:
-                                srv_url = img_server_url if (img_server_url and not img_server_url.startswith("Error")) else f"http://{socket.gethostname()}:{8505}"
-                                rel_path = os.path.relpath(real_path, IMAGE_ROOT).replace("\\", "/")
-                                direct_url = f"{srv_url}/{rel_path}"
-                                if not direct_url.lower().endswith((".png", ".webp", ".jpg", ".jpeg")):
-                                    direct_url += ".png"
+                            if direct_url:
                                 
                                 # Use st.expander + st.code for built-in copy functionality
                                 with st.expander("🔗 SillyTavern Import Link"):
